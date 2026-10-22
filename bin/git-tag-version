@@ -1,0 +1,236 @@
+#!/usr/bin/env ruby
+# git-tag-version
+
+# 20261022
+# 0.0.0
+
+# Usage:
+# 1. On the release commit, straight after merging it:
+#  `git tag-version`
+#   It tags the commit v<version>, signed, with the commit's subject as the message, and pushes the tag to origin.
+# 2. To tag another commit:
+#  `git tag-version <commit>`
+
+# Notes:
+# 1. The version is read from the commit's subject, `x.y.z: summary`, as release-audit reads it. A commit whose subject has none isn't a release, and isn't tagged.
+# 2. The CHANGELOG, the header of the program named after the repository, and the gem's version are read at the commit, and must name the same version where present, so that a forgotten bump stops it.
+# 3. Assumes that the remote is called origin.
+
+gem 'git.rb'
+gem 'switches.rb'
+
+require 'Git/Remote'
+require 'switches.rb'
+
+CHANGELOG_FILENAMES = %w{CHANGELOG CHANGELOG.md}
+CHANGELOG_VERSION = /^(?:## \[?)?(\d+\.\d+\.\d+)\b/
+GEMSPEC_CONSTANT = /\.version\s*=\s*((?:[A-Z]\w*::)+)VERSION\b/
+GEMSPEC_LITERAL = /\.version\s*=\s*['"](\d+\.\d+\.\d+)['"]/
+HEADER_DATE = /\A# \d{8}\s*\z/
+HEADER_VERSION = /\A# (\d+\.\d+\.\d+)\s*\z/
+VERSION_CONSTANT = /\bVERSION\s*=\s*['"](\d+\.\d+\.\d+)['"]/
+VERSION_SUBJECT = /\A(\d+\.\d+\.\d+):/
+
+def usage
+  puts "git-tag-version - Tag a release v<version>, signed, and push the tag to origin."
+  puts
+  puts "Usage: git tag-version [options] [<commit>]"
+  puts
+  puts "The commit is HEAD unless given. Its subject gives the version, as x.y.z: summary."
+  puts
+  puts "Options:"
+  puts "  -h, --help  Show this help"
+end
+
+def switches
+  @switches ||= Switches.new do |s|
+    s.perform(:h, :help?) do
+      usage
+      exit
+    end
+  end
+end
+
+def validate_args
+  if ARGV.length > 1
+    usage
+    exit 1
+  end
+end
+
+def validate_origin
+  abort "There is no remote called origin." unless Git::Remote.exist?('origin')
+end
+
+def git(*arguments)
+  IO.popen(['git', *arguments], err: File::NULL, &:read)
+end
+
+def run!(*command)
+  system(*command) || exit(1)
+end
+
+def short(sha)
+  sha[0, 7]
+end
+
+def commit_name
+  @commit_name ||= ARGV.first || 'HEAD'
+end
+
+def commit
+  @commit ||= git('rev-parse', '--verify', '--quiet', "#{commit_name}^{commit}").strip
+end
+
+def validate_commit
+  abort "There is no commit #{commit_name}." if commit.empty?
+end
+
+def subject
+  @subject ||= git('log', '-1', '--format=%s', commit).strip
+end
+
+def version
+  @version ||= subject[VERSION_SUBJECT, 1]
+end
+
+def tag_name
+  "v#{version}"
+end
+
+def validate_version
+  abort "#{commit_name}'s subject has no version, as x.y.z: summary, so it isn't a release: #{subject}" unless version
+end
+
+def paths
+  @paths ||= git('ls-tree', '-r', '--name-only', commit).lines.collect(&:chomp)
+end
+
+def file_at_commit(path)
+  git('show', "#{commit}:#{path}")
+end
+
+def changelog_source
+  path = CHANGELOG_FILENAMES.find{|filename| paths.include?(filename)}
+  [path, file_at_commit(path)[CHANGELOG_VERSION, 1]] if path
+end
+
+# The program is the one named after the repository: other programs alongside it in bin/ carry versions of their own.
+def repository_name
+  @repository_name ||= File.basename(Git::Remote.find('origin').url, '.git')
+end
+
+def program_path
+  @program_path ||= ["bin/#{repository_name}", repository_name].find{|path| paths.include?(path)}
+end
+
+def header_source
+  return unless program_path
+  lines = file_at_commit(program_path).lines
+  ["#{program_path}'s header", lines[4].to_s[HEADER_VERSION, 1]] if lines[3].to_s =~ HEADER_DATE
+end
+
+def gemspec_paths
+  paths.select{|path| File.extname(path) == '.gemspec' && !path.include?('/')}
+end
+
+def version_file_path(namespace)
+  File.join('lib', *namespace.split('::').reject(&:empty?), 'VERSION.rb')
+end
+
+# A gemspec whose version is neither a literal nor a constant with a file of its own under lib/ has nothing to read, and is passed over.
+def gem_source(gemspec_path)
+  gemspec = file_at_commit(gemspec_path)
+  if (literal = gemspec[GEMSPEC_LITERAL, 1])
+    [gemspec_path, literal]
+  elsif (namespace = gemspec[GEMSPEC_CONSTANT, 1])
+    path = version_file_path(namespace)
+    [path, file_at_commit(path)[VERSION_CONSTANT, 1]] if paths.include?(path)
+  end
+end
+
+def version_sources
+  @version_sources ||= ([changelog_source, header_source] + gemspec_paths.collect{|path| gem_source(path)}).compact.uniq
+end
+
+def disagreements
+  version_sources.reject{|_, named| named == version}.collect do |source, named|
+    named ? "#{source} names #{named}" : "#{source} names no version"
+  end
+end
+
+def validate_agreement
+  abort "#{commit_name} is #{version}, but #{disagreements.join(', and ')}. Nothing tagged." unless disagreements.empty?
+end
+
+def on_origin?
+  !git('for-each-ref', "--contains=#{commit}", '--format=%(refname)', 'refs/remotes/origin').strip.empty?
+end
+
+def validate_on_origin
+  abort <<~MESSAGE unless on_origin?
+    #{short(commit)} isn't on any branch of origin which this clone knows of. Push it, or fetch where it was pushed from elsewhere, then run `git tag-version` again.
+  MESSAGE
+end
+
+def local_tag_commit
+  @local_tag_commit ||= git('rev-parse', '--verify', '--quiet', "refs/tags/#{tag_name}^{commit}").strip
+end
+
+# The peeled line names the commit where the tag is annotated, and only the plain one is there where it isn't.
+def origin_tag_commit
+  @origin_tag_commit ||= (
+    refs = git('ls-remote', '--tags', 'origin', "refs/tags/#{tag_name}", "refs/tags/#{tag_name}^{}")
+    abort "origin didn't answer, so whether it has #{tag_name} isn't known." unless $?.success?
+    refs = refs.lines.collect{|line| line.split.reverse}.to_h
+    refs["refs/tags/#{tag_name}^{}"] || refs["refs/tags/#{tag_name}"] || ''
+  )
+end
+
+def validate_tags
+  abort "#{tag_name} already names #{short(local_tag_commit)}, not #{short(commit)}. Nothing tagged." unless ['', commit].include?(local_tag_commit)
+  abort "#{tag_name} already names #{short(origin_tag_commit)} on origin, not #{short(commit)}. Nothing tagged." unless ['', commit].include?(origin_tag_commit)
+end
+
+def tag!
+  run!('git', 'tag', '--sign', '--message', subject, tag_name, commit)
+end
+
+def push_tag!
+  run!('git', 'push', 'origin', "refs/tags/#{tag_name}")
+end
+
+# A tag made here where origin already has one would be another tag object, and origin would refuse it.
+def fetch_tag!
+  run!('git', 'fetch', 'origin', "refs/tags/#{tag_name}:refs/tags/#{tag_name}")
+end
+
+def tag_and_push
+  if local_tag_commit.empty? && origin_tag_commit.empty?
+    tag!
+    push_tag!
+    puts "Tagged #{short(commit)} #{tag_name} and pushed it to origin."
+  elsif local_tag_commit.empty?
+    fetch_tag!
+    puts "#{tag_name} already names #{short(commit)} on origin. Fetched it."
+  elsif origin_tag_commit.empty?
+    push_tag!
+    puts "#{tag_name} already names #{short(commit)}. Pushed it to origin."
+  else
+    puts "#{tag_name} already names #{short(commit)}, here and on origin. Nothing to do."
+  end
+end
+
+def main
+  switches
+  validate_args
+  validate_origin
+  validate_commit
+  validate_version
+  validate_agreement
+  validate_on_origin
+  validate_tags
+  tag_and_push
+end
+
+main

@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# test/fake-gpg
+
+# 20261022
+# 0.0.0
+
+# Stands in for gpg as gpg.program, so that the tests sign tags without a key: it reports a signature made, which git looks for on the status descriptor, and prints one which verifies against nothing.
+
+cat >/dev/null
+printf '\n[GNUPG:] SIG_CREATED D 1 8 00 0 0\n' >&2
+printf -- '-----BEGIN PGP SIGNATURE-----\n\nfake\n-----END PGP SIGNATURE-----\n'

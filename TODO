@@ -1,0 +1,4 @@
+# TODO
+
+1. -n, --no-push: make the tag and push nothing, and so not ask whether origin holds the commit.
+2. -a, --all: tag every versioned commit which has no v<version> tag, as release-audit reports them, each against its own CHANGELOG, header and gem version. Older CHANGELOGs are often in other formats, so many would stop.

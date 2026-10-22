@@ -1,0 +1,10 @@
+# CHANGELOG
+
+## 20261022
+
+0.0.0: Tag a release v<version>, signed, and push the tag to origin.
+
+1. + bin/git-tag-version: reads the version from the subject of HEAD, or of the commit given, as `x.y.z: summary`; stops where there is none, where the CHANGELOG's newest entry, the header of the program named after the repository or the gem's VERSION names another, where no branch of origin holds the commit, or where v<version> names another commit here or on origin; otherwise tags the commit, signed, with its subject as the message, and pushes the tag.
+2. + bin/git-tag-version: where v<version> already names the commit, pushes it if origin hasn't it, fetches it if only origin has it, and otherwise does nothing. Fetched rather than made again, since a tag made here would be another tag object, which origin refuses.
+3. + test/git-tag-version_test.rb, test/fake-gpg
+4. + README.md, LICENSE, Gemfile, TODO, CHANGELOG
